@@ -3,78 +3,82 @@ from typing import Optional
 
 import databases
 from fastapi import FastAPI
-from fastapi_users import models as user_models
-from fastapi_users import db as users_db
 from fastapi_users.authentication import AuthenticationBackend, CookieTransport, RedisStrategy
 from fastapi import Depends, Request
 from fastapi_users import BaseUserManager, FastAPIUsers
-from fastapi_users.db import SQLAlchemyUserDatabase
 
-import sqlalchemy as sa
+from fastapi_users.db import SQLAlchemyBaseUserTableUUID, SQLAlchemyUserDatabase
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.ext.declarative import DeclarativeMeta, declarative_base
+from sqlalchemy.orm import sessionmaker
 
-DATABASE_URL = 'sqlite:///./test.db'
+DATABASE_URL = "sqlite+aiosqlite:///./test.db"
+Base: DeclarativeMeta = declarative_base()
+
+class User(SQLAlchemyBaseUserTableUUID, Base):
+    pass
+
+
+engine = create_async_engine(DATABASE_URL)
+async_session_maker = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+
+async def create_db_and_tables():
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+
+async def get_async_session() -> AsyncGenerator[AsyncSession, None]:
+    async with async_session_maker() as session:
+        yield session
+
+
+async def get_user_db(session: AsyncSession = Depends(get_async_session)):
+    yield SQLAlchemyUserDatabase(session, User)
+
 SECRET = 'SECRET'  # CHANGE THIS!!
 
 
-class User(user_models.BaseUser):
+class UserManager(UUIDIDMixin, BaseUserManager[User, uuid.UUID]):
+    reset_password_token_secret = SECRET
+    verification_token_secret = SECRET
+
+    async def on_after_register(self, user: User, request: Optional[Request] = None):
+        print(f"User {user.id} has registered.")
+
+    async def on_after_forgot_password(
+        self, user: User, token: str, request: Optional[Request] = None
+    ):
+        print(f"User {user.id} has forgot their password. Reset token: {token}")
+
+    async def on_after_request_verify(
+        self, user: User, token: str, request: Optional[Request] = None
+    ):
+        print(f"Verification requested for user {user.id}. Verification token: {token}")
+
+
+async def get_user_manager(user_db=Depends(get_user_db)):
+    yield UserManager(user_db)
+
+import uuid
+
+from fastapi_users import schemas
+
+
+class UserRead(schemas.BaseUser[uuid.UUID]):
     pass
 
 
-class UserCreate(user_models.BaseUserCreate):
+class UserCreate(schemas.BaseUserCreate):
     pass
 
 
-class UserUpdate(User, user_models.BaseUserUpdate):
+class UserUpdate(schemas.BaseUserUpdate):
     pass
-
-
-class UserDB(User, user_models.BaseUserDB):
-    pass
-
-
-database = databases.Database(DATABASE_URL)
-
-Base: DeclarativeMeta = declarative_base()
-
-
-class UserTable(Base, users_db.SQLAlchemyBaseUserTable):
-    pass
-
-
-engine = sa.create_engine(DATABASE_URL, connect_args={'check_same_thread': False})
-
-users = UserTable.__table__
-
-
-# OLD: user_db = users_db.SQLAlchemyUserDatabase(UserDB, database, users)
-def get_user_db():
-    yield users_db.SQLAlchemyUserDatabase(UserDB, database, users)
-
-
-cookie_authentication = CookieAuthentication(secret=SECRET, lifetime_seconds=3600)
 
 app = FastAPI()
 
 
-class UserManager(BaseUserManager[UserCreate, UserDB]):
-    user_db_model = UserDB
-    reset_password_token_secret = SECRET
-    verification_token_secret = SECRET
-
-    # added: defaultcallback actions, just a print().
-    async def on_after_register(self, user: UserDB, request: Optional[Request] = None):
-        print(f'User {user.id} has registered.')
-
-    async def on_after_forgot_password(self, user: UserDB, token: str, request: Optional[Request] = None):
-        print(f'User {user.id} has forgot their password. Reset token: {token}')
-
-    async def on_after_request_verify(self, user: UserDB, token: str, request: Optional[Request] = None):
-        print(f'Verification requested for user {user.id}. Verification token: {token}')
-
-
-def get_user_manager(user_db: SQLAlchemyUserDatabase = Depends(get_user_db)):
-    yield UserManager(user_db)
 
 import redis.asyncio
 
@@ -85,23 +89,17 @@ def get_redis_strategy() -> RedisStrategy:
 
 cookie_transport = CookieTransport(cookie_max_age=3600)
 
+auth_backend = AuthenticationBackend(
+    name="redis",
+    transport=cookie_transport,
+    get_strategy=get_redis_strategy,
+)
 
-# OLD: jwt_authentication = JWTAuthentication(
-#     secret=SECRET, lifetime_seconds=3600, tokenUrl='auth/jwt/login'
-# )
-
-# OLD: fastapi_users = FastAPIUsers(
-#     user_db, [cookie_authentication], User, UserCreate, UserUpdate, UserDB,
-# )
 
 
 fastapi_users = FastAPIUsers(
     get_user_manager,
-    [cookie_authentication],
-    User,
-    UserCreate,
-    UserUpdate,
-    UserDB,
+    [auth_backend],
 )
 
 
@@ -117,7 +115,7 @@ async def shutdown():
 
 app.include_router(
     fastapi_users.get_auth_router(cookie_authentication),
-    prefix='/auth/jwt',
+    prefix='/auth/redis',
     tags=['auth'],
 )
 # See https://fastapi-users.github.io/fastapi-users/configuration/routers/reset/
