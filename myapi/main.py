@@ -1,11 +1,11 @@
 import uvicorn
-from typing import Optional
-
+from typing import Optional, AsyncGenerator
 import databases
 from fastapi import FastAPI
 from fastapi_users.authentication import AuthenticationBackend, CookieTransport, RedisStrategy
 from fastapi import Depends, Request
-from fastapi_users import BaseUserManager, FastAPIUsers
+from fastapi_users import BaseUserManager, FastAPIUsers, UUIDIDMixin
+import uuid
 
 from fastapi_users.db import SQLAlchemyBaseUserTableUUID, SQLAlchemyUserDatabase
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
@@ -13,6 +13,7 @@ from sqlalchemy.ext.declarative import DeclarativeMeta, declarative_base
 from sqlalchemy.orm import sessionmaker
 
 DATABASE_URL = "sqlite+aiosqlite:///./test.db"
+database = databases.Database(DATABASE_URL)
 Base: DeclarativeMeta = declarative_base()
 
 class User(SQLAlchemyBaseUserTableUUID, Base):
@@ -114,21 +115,19 @@ async def shutdown():
 
 
 app.include_router(
-    fastapi_users.get_auth_router(cookie_authentication),
+    fastapi_users.get_auth_router(auth_backend),
     prefix='/auth/redis',
     tags=['auth'],
 )
-# See https://fastapi-users.github.io/fastapi-users/configuration/routers/reset/
+
 app.include_router(
-    fastapi_users.get_register_router(), prefix='/auth', tags=['auth']
+    fastapi_users.get_register_router(UserRead, UserUpdate), prefix='/auth', tags=['auth']
 )
-# OLD: app.include_router(
-#     fastapi_users.get_reset_password_router(SECRET), prefix='/auth', tags=['auth'],
-# )
+
 app.include_router(
     fastapi_users.get_reset_password_router(), prefix='/auth', tags=['auth'],
 )
-app.include_router(fastapi_users.get_users_router(), prefix='/users', tags=['users'])
+app.include_router(fastapi_users.get_users_router(UserRead, UserUpdate), prefix='/users', tags=['users'])
 
 # ADDED:
 if __name__ == '__main__':
